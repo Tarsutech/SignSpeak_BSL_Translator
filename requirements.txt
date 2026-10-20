@@ -2,11 +2,10 @@
 mediapipe==0.10.14
 opencv-python>=4.8,<5
 numpy>=1.24,<2
-
-# Voice (optional: the app still runs without these, use --no-voice)
 SpeechRecognition>=3.10
-PyAudio>=0.2.13
 pyttsx3>=2.90
 
 # Tests
 pytest>=7
+
+# Microphone support is in requirements-voice.txt (needs PortAudio first on Mac/Linux)

@@ -18,7 +18,13 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Voice input uses Google's free speech service, so it needs an internet connection. If PyAudio won't install, run `python main.py --no-voice` and everything else still works.
+For the microphone (voice to sign), also install PyAudio. On a Mac run `brew install portaudio` first, then:
+
+```bash
+pip install -r requirements-voice.txt
+```
+
+Without it, everything else still works; the V key just says voice input isn't available. Voice input uses Google's free speech service, so it needs an internet connection.
 
 ## First run: teach it your signing
 

@@ -1,0 +1,4 @@
+# Microphone input for voice-to-sign (the V key).
+# macOS: brew install portaudio   Linux: sudo apt install portaudio19-dev
+# Windows: no extra step
+PyAudio>=0.2.13
