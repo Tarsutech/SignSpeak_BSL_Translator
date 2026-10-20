@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.vscode/
+.idea/
+.DS_Store
+
+# Personal training data (your own hands). Remove this line to share a trained model.
+data/*.npz
