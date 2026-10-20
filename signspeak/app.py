@@ -9,7 +9,7 @@ import cv2
 
 from .config import PROJECT_ROOT, Settings
 from .controller import Controller
-from .recognition.classifier import KNNClassifier
+from .recognition.classifier import LegacyModelError, SignModel
 from .ui.fingerspell import LetterLibrary
 from .ui.hud import Hud
 
@@ -20,15 +20,15 @@ def parse_args(argv: list[str] | None = None) -> Settings:
     p.add_argument("--camera", type=int, default=s.camera_index, help="webcam index (default 0)")
     p.add_argument("--width", type=int, default=s.frame_width)
     p.add_argument("--height", type=int, default=s.frame_height)
-    p.add_argument("--accurate", action="store_true",
-                   help="use the heavier hand model (more accurate, slower)")
+    p.add_argument("--fast", action="store_true",
+                   help="lighter hand model for slow laptops (less accurate)")
     p.add_argument("--model", type=Path, default=s.model_path, help="training data file")
     p.add_argument("--letters", type=Path, default=s.letters_dir,
                    help="folder of BSL letter pictures named A.png ... Z.png")
     p.add_argument("--no-voice", action="store_true", help="disable microphone and speech")
     a = p.parse_args(argv)
     s.camera_index, s.frame_width, s.frame_height = a.camera, a.width, a.height
-    s.model_complexity = 1 if a.accurate else 0
+    s.model_complexity = 0 if a.fast else 1
     s.model_path, s.letters_dir = a.model, a.letters
     s.voice = not a.no_voice
     return s
@@ -41,8 +41,20 @@ def main(argv: list[str] | None = None) -> int:
     from .vision.camera import Camera
     from .vision.hands import HandTracker
 
-    model = KNNClassifier.load(settings.model_path, settings.knn_k,
-                               settings.max_samples_per_letter)
+    model_kwargs = dict(
+        k=settings.knn_k,
+        max_samples_per_label=settings.max_samples_per_letter,
+        augment_copies=settings.augment_copies,
+        reject_factor=settings.reject_factor,
+    )
+    startup_note = None
+    try:
+        model = SignModel.load(settings.model_path, **model_kwargs)
+    except LegacyModelError:
+        backup = settings.model_path.with_name("model_v1_backup.npz")
+        settings.model_path.replace(backup)
+        model = SignModel(**model_kwargs)
+        startup_note = "New recognition engine: please retrain your letters (old data backed up)"
     # Also accept the old repo's bsl_letters/ folder
     library = LetterLibrary([settings.letters_dir, PROJECT_ROOT / "bsl_letters"])
     if library.missing:
@@ -58,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
         listener = SpeechListener(settings.listen_timeout, settings.phrase_time_limit)
 
     controller = Controller(settings, model, library, speaker, listener)
+    if startup_note:
+        controller.notify(startup_note, "warn")
     hud = Hud()
     tracker = HandTracker(settings.max_hands, settings.model_complexity,
                           settings.detection_confidence, settings.tracking_confidence)

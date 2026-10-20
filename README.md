@@ -37,7 +37,12 @@ BSL fingerspelling is two-handed and everyone signs a little differently, so Sig
 
 Training is saved to `data/model.npz` and loads automatically next time. To redo a letter, press **Backspace** then the letter in training mode, and record it again.
 
-Tips: train in the lighting you'll use, keep both hands fully in frame, and add a second round of samples for letters it mixes up.
+### Getting it accurate
+
+- **Record each letter 2–3 times**, not once. Press the key again to add another round. Shift your hands a little between rounds (closer, further, slightly tilted). Variety matters more than quantity.
+- Keep **both hands fully in frame** and use the lighting you'll actually sign in.
+- If it shows **"or X?"** under the guess, it's torn between two letters. Add another round of both.
+- Is a letter just wrong? Press **Backspace then the letter** to forget it, and record it fresh.
 
 ## Controls
 
@@ -63,7 +68,7 @@ The speech-to-sign panel shows a card per letter. Put your own pictures in `asse
 
 ```
 python main.py --camera 1          use a different webcam
-python main.py --accurate          heavier hand model, more accurate, slower
+python main.py --fast              lighter hand model for slow laptops (less accurate)
 python main.py --width 960 --height 540   lower resolution for slower laptops
 python main.py --no-voice          no microphone or speech
 ```
@@ -77,9 +82,10 @@ camera thread ──> MediaPipe hands ──> features ──> kNN classifier �
 microphone thread ──> speech to text ──> letters ──> fingerspelling player ──> letter cards
 ```
 
-- **Features** (`recognition/features.py`): each hand's 21 landmarks are centred on the wrist and scaled by hand size, so it doesn't matter where you sit or how close you are. Both hands are included, plus where they are relative to each other, because most BSL letters touch one hand with the other.
-- **Classifier** (`recognition/classifier.py`): k-nearest neighbours on your own samples. It trains instantly and redoing one letter doesn't affect the rest. Poses that don't look like anything trained are ignored.
-- **Stabiliser** (`recognition/stabiliser.py`): a letter is typed only after it has been held steadily for 8 frames, and only once per hold.
+- **Features** (`recognition/features.py`): each hand's shape is centred on the wrist and scaled by palm size, so it doesn't matter where you sit or how close you are. Hands are ordered by where they are on screen, not MediaPipe's left/right labels, which flip when hands touch. On top of that it measures the distance from every fingertip of one hand to every fingertip of the other, because in BSL *which finger touches where* is what tells most letters apart.
+- **Training** stores raw landmarks, then adds slightly rotated and jittered copies of each frame, so 40 recorded frames act like 160 and cope with small differences on another day.
+- **Classifier** (`recognition/classifier.py`): k-nearest neighbours over your examples. It trains instantly, takes under 1 ms per frame, and redoing one letter doesn't affect the rest.
+- **Smoothing and voting**: the last 4 frames of landmarks are averaged to calm tracking jitter, then the last 10 guesses vote. A letter is typed once it gets 7 votes, so the odd wrong frame doesn't reset it.
 - **Threads**: the camera, speech output and speech input each run in the background, so the video never stalls.
 
 ## Limits

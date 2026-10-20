@@ -33,6 +33,7 @@ class HudState:
     message_level: str = "info"  # info | good | warn | bad
     guess: str | None = None
     confidence: float = 0.0
+    runner_up: str | None = None
     progress: float = 0.0
     hands: int = 0
     model_letters: int = 0
@@ -134,7 +135,12 @@ class Hud:
         lw = _text_width(letter, 1.6 * k, 2)
         _text(img, letter, (cx - lw // 2, cy + int(19 * k)), 1.6 * k, col, 2)
 
-        label = f"{s.confidence * 100:3.0f}% sure" if s.guess else "no match"
+        if s.guess and s.runner_up and s.confidence < 0.85:
+            label = f"{s.confidence * 100:.0f}%  or {s.runner_up}?"
+        elif s.guess:
+            label = f"{s.confidence * 100:3.0f}% sure"
+        else:
+            label = "no match"
         _text(img, label, (x0 + int(14 * k), y0 + size + int(18 * k)), 0.45 * k, MUTED, 1,
               FONT_SMALL)
 

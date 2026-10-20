@@ -4,13 +4,14 @@ which keeps it easy to test."""
 from __future__ import annotations
 
 import time
+from collections import deque
 from typing import Callable, Sequence
 
 import numpy as np
 
 from .config import Settings
-from .recognition.classifier import KNNClassifier
-from .recognition.features import HandLike, build_features
+from .recognition.classifier import SignModel
+from .recognition.features import HandLike, features_from_raw, hands_to_raw
 from .recognition.stabiliser import LetterStabiliser
 from .text import ALPHABET, text_to_tokens
 from .ui.fingerspell import FingerspellPlayer, LetterLibrary
@@ -27,7 +28,7 @@ class Controller:
     def __init__(
         self,
         settings: Settings,
-        model: KNNClassifier,
+        model: SignModel,
         library: LetterLibrary,
         speaker=None,
         listener=None,
@@ -41,7 +42,9 @@ class Controller:
         self._clock = clock
 
         self.mode = "translate"
-        self.stabiliser = LetterStabiliser(settings.stable_frames, settings.space_after, clock=clock)
+        self.stabiliser = LetterStabiliser(
+            settings.vote_window, settings.vote_need, settings.space_after, clock=clock
+        )
         self.player = FingerspellPlayer(settings.letter_hold, settings.space_hold, clock=clock)
         self.heard_text = ""
         self.show_landmarks = True
@@ -51,7 +54,11 @@ class Controller:
         self._confidence = 0.0
         self._hands = 0
         self._capturing: str | None = None
-        self._capture_buf: list[np.ndarray] = []
+        self._capture_raw: list[np.ndarray] = []
+        self._capture_hands = 0
+        self._smooth: deque[np.ndarray] = deque(maxlen=settings.smoothing_frames)
+        self._smooth_hands = 0
+        self._runner_up: str | None = None
         self._forget_armed = False
         self._message = ""
         self._message_level = "info"
@@ -75,38 +82,56 @@ class Controller:
             self._fps = 1 / dt if self._fps == 0 else self._fps * 0.9 + (1 / dt) * 0.1
         self._last_tick = now
 
-        self._hands = len(hands)
-        features = build_features(hands, aspect)
+        raw, n = hands_to_raw(hands, aspect)
+        self._hands = n
 
         if self.mode == "train":
-            self._update_training(features)
+            self._update_training(raw, n)
         else:
-            self._update_translation(features)
+            self._update_translation(raw, n)
 
         self._poll_speech()
 
-    def _update_translation(self, features: np.ndarray | None) -> None:
-        label = None
-        self._confidence = 0.0
-        if features is not None:
-            pred = self.model.predict(features)
-            if (
-                pred is not None
-                and pred.confidence >= self.s.min_confidence
-                and pred.distance <= self.s.max_distance
-            ):
-                label, self._confidence = pred.label, pred.confidence
-        self._guess = label
-        self.stabiliser.update(label, hands_present=features is not None)
+    def _smoothed(self, raw: np.ndarray, n: int) -> np.ndarray:
+        """Average the last few frames of landmarks to calm MediaPipe's jitter.
+        Restarts whenever the number of hands changes, so it never blends
+        a one-handed frame into a two-handed one."""
+        if n != self._smooth_hands:
+            self._smooth.clear()
+            self._smooth_hands = n
+        self._smooth.append(raw)
+        return np.mean(self._smooth, axis=0)
 
-    def _update_training(self, features: np.ndarray | None) -> None:
-        if self._capturing is None or features is None:
+    def _update_translation(self, raw: np.ndarray, n: int) -> None:
+        label, self._runner_up = None, None
+        self._confidence = 0.0
+        if n:
+            features = features_from_raw(self._smoothed(raw, n), n)
+            pred = self.model.predict(features)
+            if pred is not None and pred.confidence >= self.s.min_confidence:
+                label, self._confidence = pred.label, pred.confidence
+                self._runner_up = pred.runner_up
+        else:
+            self._smooth.clear()
+            self._smooth_hands = 0
+        self._guess = label
+        self.stabiliser.update(label, hands_present=n > 0)
+
+    def _update_training(self, raw: np.ndarray, n: int) -> None:
+        if self._capturing is None or n == 0:
             return
-        self._capture_buf.append(features)
-        if len(self._capture_buf) >= self.s.samples_per_capture:
+        # Every frame of one recording must show the same number of hands,
+        # otherwise a moment where tracking lost a hand would poison the letter
+        if not self._capture_raw:
+            self._capture_hands = n  # the first frame decides one or two hands
+        elif n != self._capture_hands:
+            return
+        self._capture_raw.append(raw)
+        if len(self._capture_raw) >= self.s.samples_per_capture:
             letter = self._capturing
-            self.model.add(letter, np.stack(self._capture_buf))
-            self._capturing, self._capture_buf = None, []
+            self.model.add(letter, np.stack(self._capture_raw),
+                           np.full(len(self._capture_raw), n))
+            self._capturing, self._capture_raw = None, []
             self._save()
             self.notify(f"Learned {letter} ({self.model.counts().get(letter, 0)} samples)", "good")
 
@@ -173,7 +198,7 @@ class Controller:
 
     def _train_key(self, key: int) -> None:
         if key == KEY_ESC or key in KEY_ENTER:
-            self._capturing, self._capture_buf = None, []
+            self._capturing, self._capture_raw = None, []
             self._forget_armed = False
             self.mode = "translate"
             self.stabiliser.clear()
@@ -198,8 +223,8 @@ class Controller:
         if self._hands == 0:
             self.notify("Show your hands first, then press the letter", "warn")
             return
-        self._capturing, self._capture_buf = ch, []
-        self.notify(f"Recording {ch}...", "info")
+        self._capturing, self._capture_raw = ch, []
+        self.notify(f"Recording {ch}... hold it steady", "info")
 
     def _speak(self) -> None:
         text = self.stabiliser.text.strip()
@@ -246,7 +271,8 @@ class Controller:
             train_counts=self.model.counts(),
             train_target=self.s.samples_per_capture,
             capturing=self._capturing,
-            capture_progress=len(self._capture_buf) / self.s.samples_per_capture,
+            capture_progress=len(self._capture_raw) / self.s.samples_per_capture,
+            runner_up=self._runner_up,
             listen_state=listen_state,
             speaking=bool(self.speaker and self.speaker.busy),
             card=card,

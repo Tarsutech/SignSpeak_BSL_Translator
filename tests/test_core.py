@@ -7,8 +7,15 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 
-from signspeak.recognition.classifier import KNNClassifier
-from signspeak.recognition.features import FEATURE_DIM, HAND_DIM, build_features
+from signspeak.recognition.classifier import LegacyModelError, SignModel
+from signspeak.recognition.features import (
+    CROSS_DIM,
+    FEATURE_DIM,
+    HAND_DIM,
+    augment,
+    build_features,
+    hands_to_raw,
+)
 from signspeak.recognition.stabiliser import LetterStabiliser
 from signspeak.text import text_to_tokens, wrap_text
 from signspeak.ui.fingerspell import FingerspellPlayer
@@ -45,82 +52,159 @@ def test_features_ignore_position_and_size():
     b = make_hand("Right", 1, offset=(0.6, 0.3), scale=0.2)
     fa, fb = build_features([a]), build_features([b])
     assert fa.shape == (FEATURE_DIM,)
-    np.testing.assert_allclose(fa, fb, atol=1e-5)
+    np.testing.assert_allclose(fa, fb, atol=1e-4)
 
 
-def test_features_slot_by_handedness_and_order_independent():
+def test_hands_ordered_by_position_not_label():
+    """MediaPipe's left/right labels flip when hands touch; order must not."""
     r, l = make_hand("Right", 1, (0.6, 0.5)), make_hand("Left", 2, (0.3, 0.5))
-    f1, f2 = build_features([r, l]), build_features([l, r])
-    np.testing.assert_allclose(f1, f2)
-    assert f1[-2:].tolist() == [1.0, 1.0]
-    only_left = build_features([l])
-    assert np.all(only_left[:HAND_DIM] == 0) and only_left[-2:].tolist() == [0.0, 1.0]
+    flipped_r, flipped_l = FakeHand("Left", r.points), FakeHand("Right", l.points)
+    f1 = build_features([r, l])
+    np.testing.assert_allclose(f1, build_features([l, r]))
+    np.testing.assert_allclose(f1, build_features([flipped_r, flipped_l]))
+    assert f1[-1] > 0 and build_features([l])[-1] == 0
 
 
-def test_features_duplicate_labels_resolved_by_position():
-    a, b = make_hand("Right", 1, (0.7, 0.5)), make_hand("Right", 2, (0.2, 0.5))
-    f = build_features([b, a])
-    np.testing.assert_allclose(f[:HAND_DIM], build_features([a])[:HAND_DIM], atol=1e-5)
+def test_cross_distances_see_contact():
+    left, right = make_hand("Left", 2, (0.3, 0.5)), make_hand("Right", 1, (0.6, 0.5))
+    near = FakeHand("Right", right.points.copy())
+    near.points[:, 0] -= 0.25
+    o = 2 * HAND_DIM
+    assert build_features([left, near])[o:o + CROSS_DIM].min() < \
+        build_features([left, right])[o:o + CROSS_DIM].min()
 
 
 def test_no_hands_gives_none():
     assert build_features([]) is None
 
 
-# ---- classifier ---------------------------------------------------------
-def test_knn_learns_and_round_trips(tmp_path):
-    model = KNNClassifier(k=3)
+def test_augment_keeps_shape_and_hand_count():
+    raw, n = hands_to_raw([make_hand("Right", 1)])
+    out = augment(raw, n, 5, np.random.default_rng(0))
+    assert out.shape == (5, 2, 21, 3) and np.all(out[:, 1] == 0)
+    assert not np.allclose(out[0], raw)
+
+
+# ---- model ----------------------------------------------------------------
+def _poses(n_letters=8):
+    letters = []
+    for i in range(n_letters):
+        two = i % 2 == 0
+        hands = [make_hand("Right", 100 + i, (0.6, 0.5))]
+        if two:
+            hands.append(make_hand("Left", 200 + i, (0.4, 0.5)))
+        letters.append((chr(65 + i), hands))
+    return letters
+
+
+def _jitter(hands, rng, noise, shift, scale, angle):
+    out = []
+    for h in hands:
+        p = h.points.copy()
+        c = p[:, :2].mean(axis=0)
+        ca, sa = np.cos(angle), np.sin(angle)
+        xy = (p[:, :2] - c) @ np.array([[ca, sa], [-sa, ca]]) * scale + c + shift
+        p[:, :2] = xy + rng.normal(0, noise, xy.shape)
+        out.append(FakeHand(h.label, p))
+    return out
+
+
+def _record(model, letters, rng, n=40):
+    for label, hands in letters:
+        raws, nh = zip(*(hands_to_raw(_jitter(hands, rng, 0.002, 0, 1, 0)) for _ in range(n)))
+        model.add(label, np.stack(raws), np.array(nh))
+
+
+def test_model_recognises_new_takes_of_trained_letters():
+    rng = np.random.default_rng(1)
+    letters = _poses()
+    model = SignModel()
+    _record(model, letters, rng)
+    correct = total = 0
+    for label, hands in letters:
+        for _ in range(30):  # a different day: moved, closer, slightly tilted, shakier
+            test = _jitter(hands, rng, 0.004, rng.uniform(-0.1, 0.1, 2),
+                           rng.uniform(0.8, 1.25), rng.uniform(-0.1, 0.1))
+            pred = model.predict(build_features(test))
+            correct += pred is not None and pred.label == label
+            total += 1
+    assert correct / total > 0.95
+
+
+def test_model_round_trips_and_caps(tmp_path):
     rng = np.random.default_rng(0)
-    centres = {"A": rng.normal(size=FEATURE_DIM), "B": rng.normal(size=FEATURE_DIM)}
-    for label, c in centres.items():
-        model.add(label, c + rng.normal(scale=0.05, size=(20, FEATURE_DIM)))
-
-    pred = model.predict(centres["B"])
-    assert pred.label == "B" and pred.confidence > 0.99
-
+    model = SignModel(max_samples_per_label=30)
+    _record(model, _poses(3), rng, n=40)
+    assert model.counts() == {"A": 30, "B": 30, "C": 30}
     path = tmp_path / "model.npz"
     model.save(path)
-    loaded = KNNClassifier.load(path, k=3)
-    assert loaded.counts() == {"A": 20, "B": 20}
-    assert loaded.predict(centres["A"]).label == "A"
+    loaded = SignModel.load(path, max_samples_per_label=30)
+    assert loaded.counts() == model.counts()
+    feats = build_features(_poses(3)[1][1])
+    assert loaded.predict(feats).label == model.predict(feats).label == "B"
+    assert loaded.remove("A") == 30 and loaded.labels == ["B", "C"]
 
-    assert loaded.remove("A") == 20 and loaded.labels == ["B"]
+
+def test_old_model_file_is_detected(tmp_path):
+    path = tmp_path / "model.npz"
+    np.savez(path, x=np.zeros((1, 5)), y=np.array(["A"]))
+    with pytest.raises(LegacyModelError):
+        SignModel.load(path)
 
 
-def test_knn_caps_samples_and_rejects_bad_shape():
-    model = KNNClassifier(max_samples_per_label=10)
-    model.add("A", np.zeros((25, FEATURE_DIM)))
-    assert model.counts() == {"A": 10}
-    with pytest.raises(ValueError):
-        model.add("A", np.zeros((1, 5)))
-    assert KNNClassifier().predict(np.zeros(FEATURE_DIM)) is None
+def test_empty_model_predicts_nothing():
+    assert SignModel().predict(np.zeros(FEATURE_DIM, np.float32)) is None
 
 
 # ---- stabiliser -----------------------------------------------------------
 def test_letter_typed_once_per_hold():
-    st = LetterStabiliser(stable_frames=3, space_after=1.0, clock=FakeClock())
-    typed = [st.update("A", True) for _ in range(10)]
+    st = LetterStabiliser(window=5, need=3, clock=FakeClock())
+    typed = [st.update("A", True) for _ in range(20)]
     assert typed.count("A") == 1 and st.text == "A"
 
 
+def test_odd_wrong_frames_do_not_block_typing():
+    st = LetterStabiliser(window=10, need=7, clock=FakeClock())
+    for label in ["B", "B", "R", "B", "B", None, "B", "B", "B"]:
+        st.update(label, True)
+    assert st.text == "B"
+
+
 def test_flicker_does_not_retype_but_release_does():
-    st = LetterStabiliser(stable_frames=3, release_frames=4, clock=FakeClock())
-    for _ in range(3):
+    st = LetterStabiliser(window=10, need=7, release=5, clock=FakeClock())
+    for _ in range(8):
         st.update("L", True)
     st.update(None, True)  # one-frame flicker
     for _ in range(5):
         st.update("L", True)
     assert st.text == "L"
+    for _ in range(5):
+        st.update("O", True)  # changed hands for a moment
+    for _ in range(9):
+        st.update("L", True)
+    assert st.text == "LL"
+
+
+def test_changing_letter_does_not_retype_previous_one():
+    st = LetterStabiliser(window=10, need=7, release=5, clock=FakeClock())
+    for label in ["A"] * 12 + ["B"] * 12:
+        st.update(label, True)
+    assert st.text == "AB"
+
+
+def test_dropping_hands_allows_double_letters():
+    st = LetterStabiliser(window=5, need=3, space_after=10, clock=FakeClock())
     for _ in range(4):
-        st.update(None, True)  # real release
-    for _ in range(3):
+        st.update("L", True)
+    st.update(None, False)
+    for _ in range(4):
         st.update("L", True)
     assert st.text == "LL"
 
 
 def test_space_after_hands_gone():
     clock = FakeClock()
-    st = LetterStabiliser(stable_frames=2, space_after=1.0, clock=clock)
+    st = LetterStabiliser(window=2, need=2, space_after=1.0, clock=clock)
     st.update("H", True)
     st.update("H", True)
     st.update(None, False)

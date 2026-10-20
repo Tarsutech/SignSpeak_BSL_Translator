@@ -16,20 +16,23 @@ class Settings:
     frame_height: int = 720
     mirror: bool = True  # selfie view; also makes MediaPipe's handedness labels correct
 
-    # Hand tracking (model_complexity 0 is fastest, 1 is more accurate)
+    # Hand tracking (model_complexity 1 is more accurate, 0 is faster)
     max_hands: int = 2
-    model_complexity: int = 0
+    model_complexity: int = 1
     detection_confidence: float = 0.6
-    tracking_confidence: float = 0.5
+    tracking_confidence: float = 0.6
 
     # Recognition
-    knn_k: int = 5
-    min_confidence: float = 0.6  # share of neighbour votes the winning letter needs
-    max_distance: float = 4.0  # reject poses far from anything trained
-    max_samples_per_letter: int = 300
+    knn_k: int = 7
+    min_confidence: float = 0.55  # share of neighbour votes the winning letter needs
+    reject_factor: float = 20.0  # lower = more poses ignored as "not a letter"
+    max_samples_per_letter: int = 200
+    augment_copies: int = 3  # extra varied copies made from each recorded frame
+    smoothing_frames: int = 4  # frames of landmarks averaged before guessing
 
-    # Turning a stream of predictions into text
-    stable_frames: int = 8  # frames a letter must hold before it is typed
+    # Turning a stream of guesses into text
+    vote_window: int = 10  # recent frames that vote on the letter
+    vote_need: int = 7  # votes a letter needs out of the window to be typed
     space_after: float = 1.5  # seconds with no hands before a space is added
 
     # Training
